@@ -1,0 +1,4 @@
+[
+    { "keys": ["ctrl+t", "ctrl+r"], "command": "py_build_index" },
+    { "keys": ["ctrl+t", "ctrl+t"], "command": "py_find_symbol" }
+]

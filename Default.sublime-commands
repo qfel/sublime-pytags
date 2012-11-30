@@ -1,0 +1,23 @@
+[
+    {
+        "caption": "PyTags: Update Index",
+        "command": "py_build_index",
+        "args": {
+            "rebuild": false
+        }
+    },
+    {
+        "caption": "PyTags: Rebuild Index",
+        "command": "py_build_index",
+        "args": {
+            "rebuild": true
+        }
+    },
+    {
+        "caption": "PyTags: Find Definition",
+        "command": "py_find_symbol",
+        "args": {
+            "ask": true
+        }
+    }
+]
