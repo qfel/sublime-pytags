@@ -52,6 +52,9 @@ Settings
  - **pytags\_index\_on\_save** - Whether to index saved files.
  - **pytags\_index\_on\_load** - Whether to index opened files.
  - **pytags\_complete\_imports** - Whether to enable import completions.
+ - **pytags\_exclusive\_completions** - Whether regular completions should be
+                                        hidden when import completions are
+                                        available.
  - **pytags\_databases** - List of databases to search/update, see next section.
 
 Database Definitions
@@ -72,6 +75,21 @@ _os.path.expandvars_.
 
 Import Completions
 ------------------
-Only single components of module/package are included in completions (not full
-_some.module.name_ paths). Import completions are displayed with "Package"
-annotation on the right.
+With import completions on, typing **from** _\<ctrl+space\>_ will pop up a list
+of indexed modules, and typing **from foo.bar import** _\<ctrl+space\>_ will
+bring up a list of indexed _foo.bar_'s members.
+
+
+Compatibility Issues
+--------------------
+For completions to work, a little extended "Python (PyTags)" syntax is required.
+If you enable import completions, it will be automatically used instead of
+default Python syntax. "Python (PyTags)" top-level scope is
+_source.python.pytags_. Plugins that incorrectly check scopes, like
+```python
+"some_string" in scope.split()
+```
+may have compatibility issues. Also, the syntax file name is
+"Python.tmLanguage", which makes _View->Syntax_ menu incorrectly mark both
+_Python_ and _Python (PyTags)_ as currently used. Using this name makes
+[Sublime Linter](https://github.com/SublimeLinter/SublimeLinter) work though.
