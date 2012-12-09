@@ -4,11 +4,13 @@ import os.path
 
 from subprocess import PIPE, Popen
 
+# For debugging. Set to True from Python console to enable logging all LPC
+# calls to stdout.
+LOG_LPC = False
 
 # This module is handles data pickled by different Python version, so use
 # explicit protocol number.
 PICKLE_PROTOCOL = 2
-
 
 # Path to LPC server implementation. This must be computed here, as __file__ is
 # relative and valid only when this script is being loaded.
@@ -30,7 +32,16 @@ class FunctionProxy(object):
         try:
             pickle.dump((self.name, args, kwargs), process.stdin,
                         PICKLE_PROTOCOL)
-            return pickle.load(process.stdout)
+            ret = pickle.load(process.stdout)
+            if LOG_LPC:
+                args = list(args)
+                args.extend('{0}={1!r}'.format(k, v)
+                            for k, v in kwargs.iteritems())
+                print '[LPC] {0}({1}): {2!r}'.format(self.name,
+                                                     ', '.join(repr(a) for a
+                                                               in args),
+                                                     ret)
+            return ret
         except (IOError, EOFError, pickle.UnpicklingError):
             raise LPCError(process.stderr.read())
 
@@ -42,7 +53,10 @@ class LPCClient(object):
 
     def _cleanup(self):
         self._process.stdin.close()
+        self._process.stdout.close()
+        self._process.stderr.close()
         self._process.wait()
+        self._process = None
 
     def __del__(self):
         self._cleanup()

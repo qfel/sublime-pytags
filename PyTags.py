@@ -6,12 +6,23 @@ import re
 
 from functools import partial
 
-from sublime import ENCODED_POSITION, message_dialog, set_timeout, \
-    status_message
+from sublime import ENCODED_POSITION, INHIBIT_EXPLICIT_COMPLETIONS, \
+    INHIBIT_WORD_COMPLETIONS, message_dialog, set_timeout, status_message
 from sublime_plugin import EventListener, TextCommand
 
 from pytags.async import async_worker
 from pytags.lpc.client import LPCClient
+
+
+def get_module_name(view, pos):
+    while True:
+         # Should not happen if syntax definition works correctly.
+        assert pos >= 0
+
+        scope = view.extract_scope(pos)
+        if view.score_selector(scope.a, 'source.python.pytags.import.module'):
+            return view.substr(scope).strip()
+        pos = scope.a - 1
 
 
 def is_python_source_file(file_name):
@@ -136,7 +147,8 @@ class PyTagsListener(EventListener):
 
     @classmethod
     def on_load(cls, view):
-        if is_python_source_file(view.file_name()) and \
+        file_name = view.file_name()  # This may be None.
+        if file_name is not None and is_python_source_file(file_name) and \
                 view.settings().get('pytags_index_on_load'):
             cls.index_view(view)
 
@@ -156,23 +168,62 @@ class PyTagsListener(EventListener):
 
     @classmethod
     def on_query_completions(cls, view, prefix, locations):
-        if not view.settings().get('pytags_complete_imports'):
+        settings = view.settings()
+
+        # Test if completion disabled by user.
+        if not settings.get('pytags_complete_imports'):
             return []
 
-        # Prefix passed by sublime is useless, because it stops at ".". Compute
-        # our own.
-        prefix = cls.get_prefix(view, locations[0])
-        for location in locations[1:]:
-            if cls.get_prefix(view, location) != prefix:
-                # Distinct prefixes in multiple selection - nothing to show.
-                return []
+        # Automatically use completion-enabled syntax.
+        if settings.get('syntax') == 'Packages/Python/Python.tmLanguage':
+            view.set_syntax_file('Packages/PyTags/Python.tmLanguage')
 
+        # Test for single selection (multiple selections are unsupported).
+        if len(locations) != 1:
+            return []
+        pos = locations[0]
+
+        # Defined scope names do not catch newlines, but the user will often
+        # place cursor at the end of the line.
+        if view.substr(pos) == '\n':
+            pos -= 1
+
+        # Test for import context.
+        if view.score_selector(pos, 'source.python.pytags.import.member'):
+            # from..import foo.b<ar-to-complete>
+            complete_member = True
+        elif view.score_selector(pos, 'source.python.pytags.import.module'):
+            # One of:
+            # from foo.b<ar-to-complete> import..
+            # import foo.b<ar-to-complete>
+            complete_member = False
+        else:
+            # Not in import/from..import statement context.
+            return []
+
+        # Query the database.
         with SymDb() as symdb:
             symdb.set_db([os.path.expandvars(db['path'])
-                          for db in view.settings().get('pytags_databases')])
-            packages = set(package.split('.')[prefix.count('.')]
-                           for package in symdb.query_packages(prefix + '*'))
-            return [(package + '\tModule', package) for package in packages]
+                          for db in settings.get('pytags_databases')])
+
+            if complete_member:
+                members = symdb.query_members(get_module_name(view, pos),
+                                              prefix)
+                completions = [(member + '\tMember', member)
+                               for member in members]
+            else:
+                prefix = cls.get_prefix(view, locations[0])
+                packages = set(package.split('.')[prefix.count('.')]
+                               for package
+                               in symdb.query_packages(prefix + '*'))
+                completions = [(package + '\tModule', package)
+                               for package in packages]
+
+        if settings.get('pytags_exclusive_completions'):
+            return (completions,
+                    INHIBIT_WORD_COMPLETIONS | INHIBIT_EXPLICIT_COMPLETIONS)
+        else:
+            return completions
 
 
 class PyBuildIndexCommand(PythonCommandMixin, TextCommand):

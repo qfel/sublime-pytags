@@ -140,6 +140,21 @@ class SymbolDatabase(object):
         for row in self.cur:
             yield self._result_row_to_dict(row)
 
+    def members(self, package, prefix):
+        self.cur.execute('''
+            SELECT DISTINCT s.symbol
+            FROM all_symbols s, all_files f
+            WHERE
+                s.file_id = f.id AND
+                s.dbid = f.dbid AND
+                f.package = :package AND
+                GLOB(:prefix || '*', s.symbol) AND
+                s.scope = ''
+
+            ORDER BY s.symbol, f.path, s.row
+        ''', locals())
+        return (row[0] for row in self.cur)
+
     def query_packages(self, pattern):
         self.cur.execute('''
             SELECT DISTINCT package FROM all_files WHERE package GLOB :pattern
@@ -234,6 +249,10 @@ def remove_other_files(file_paths):
 
 def query_occurrences(symbol):
     return list(db.occurrences(symbol))
+
+
+def query_members(package, prefix):
+    return list(db.members(package, prefix))
 
 
 def query_packages(pattern):
