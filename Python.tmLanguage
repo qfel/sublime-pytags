@@ -70,6 +70,15 @@
 					<string>source.python.pytags.import.member</string>
 					<key>end</key>
 					<string>(?&lt;!\\)(?=\n)</string>
+					<key>patterns</key>
+					<array>
+						<dict>
+							<key>match</key>
+							<string>\bas\b</string>
+							<key>name</key>
+							<string>keyword.other.python</string>
+						</dict>
+					</array>
 				</dict>
 			</array>
 		</dict>
@@ -88,6 +97,15 @@
 			<string>source.python.pytags.import.module</string>
 			<key>end</key>
 			<string>(?&lt;!\\)\n</string>
+			<key>patterns</key>
+			<array>
+				<dict>
+					<key>match</key>
+					<string>\bas\b</string>
+					<key>name</key>
+					<string>keyword.other.python</string>
+				</dict>
+			</array>
 		</dict>
 		<dict>
 			<key>include</key>
