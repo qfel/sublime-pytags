@@ -13,13 +13,13 @@ class AsyncResult(object):
         self.event = Event()
 
     def get(self, timeout=None):
-        has_result = self.event.wait(timeout)
+        self.event.wait(timeout)
         if timeout is None:
             if self.failed:
                 raise self.result
             return self.result
         else:
-            return has_result, self.result
+            return self.event.is_set(), self.result
 
     def capture(self, f):
         ''' Execute f() and save its result. '''
