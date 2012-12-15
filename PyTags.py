@@ -52,9 +52,17 @@ symdb = SymDbClient(os.path.abspath(os.path.join(
 
 class PyTagsCommandMixin(object):
     def is_enabled(self, **kwargs):
-        syntax = self.view.settings().get('syntax')
+        settings = self.view.settings()
+
+        syntax = settings.get('syntax')
         syntax = os.path.splitext(os.path.basename(syntax))[0].lower()
-        return syntax == 'python'
+        if syntax != 'python':
+            return False
+
+        if not settings.get('pytags_databases'):
+            return False
+
+        return True
 
 
 class PyFindSymbolCommand(PyTagsCommandMixin, TextCommand):
@@ -121,6 +129,10 @@ class PyFindSymbolCommand(PyTagsCommandMixin, TextCommand):
 
 class PyTagsListener(EventListener):
     def index_view(self, view):
+        databases = view.settings().get('pytags_databases')
+        if not databases:
+            return
+
         if view.window():
             project_folders = view.window().folders()
         else:
@@ -128,8 +140,7 @@ class PyTagsListener(EventListener):
             project_folders = []
 
         async_worker.schedule(self.async_index_view, view.file_name(),
-                              view.settings().get('pytags_databases'),
-                              project_folders)
+                              databases, project_folders)
 
     @staticmethod
     def async_index_view(file_name, databases, project_folders):
@@ -168,9 +179,9 @@ class PyTagsListener(EventListener):
             self.index_view(view)
 
     def on_post_save(self, view):
-        if is_python_source_file(view.file_name()):
-            if view.settings().get('pytags_index_on_save'):
-                self.index_view(view)
+        if is_python_source_file(view.file_name()) and \
+                view.settings().get('pytags_index_on_save'):
+            self.index_view(view)
 
     @staticmethod
     def get_prefix(view, pos):
