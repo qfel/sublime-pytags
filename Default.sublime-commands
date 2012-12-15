@@ -3,14 +3,14 @@
         "caption": "PyTags: Update Index",
         "command": "py_build_index",
         "args": {
-            "rebuild": false
+            "action": "update"
         }
     },
     {
         "caption": "PyTags: Rebuild Index",
         "command": "py_build_index",
         "args": {
-            "rebuild": true
+            "action": "rebuild"
         }
     },
     {

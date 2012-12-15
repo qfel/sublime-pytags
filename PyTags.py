@@ -4,13 +4,14 @@ import os
 import os.path
 import re
 
-from functools import partial
+from operator import eq as op_eq, ne as op_ne
 
 from sublime import ENCODED_POSITION, INHIBIT_EXPLICIT_COMPLETIONS, \
-    INHIBIT_WORD_COMPLETIONS, message_dialog, set_timeout, status_message
+    INHIBIT_WORD_COMPLETIONS, OP_EQUAL, OP_NOT_EQUAL, message_dialog, \
+    status_message
 from sublime_plugin import EventListener, TextCommand
 
-from pytags.async import async_worker
+from pytags.async import async_worker, ui_worker
 from pytags.lpc.client import LPCClient
 
 
@@ -29,32 +30,38 @@ def is_python_source_file(file_name):
     return file_name.endswith('.py') or file_name.endswith('.pyw')
 
 
-def async_status_message(msg):
-    set_timeout(partial(status_message, msg), 0)
+class SymDbClient(LPCClient):
+    _databases = None
+
+    def set_databases(self, databases):
+        if databases != self._databases or self._process is None:
+            self._error = None
+            self._databases = databases
+            self._call('set_databases', [os.path.expandvars(db['path'])
+                                         for db in databases])
 
 
-def get_ordered_databases(settings):
-    databases = settings.get('pytags_databases', [])
-    databases.sort(key=lambda db: db.get('index', float('inf')))
-    return databases
+# Interface to code running in external Python interpreter. It keeps some state
+# in external process (and a tiny cache in Sublime's embedded interpreted too),
+# so it is not thread-safe. Use it only in code executed by async_worker.
+symdb = SymDbClient(os.path.abspath(os.path.join(
+    os.path.dirname(__file__),
+    'external',
+    'symdb.py')))
 
 
-SymDb = partial(LPCClient,
-                os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                             'external', 'symdb.py')))
-
-
-class PythonCommandMixin(object):
-    def is_enabled(self):
+class PyTagsCommandMixin(object):
+    def is_enabled(self, **kwargs):
         syntax = self.view.settings().get('syntax')
         syntax = os.path.splitext(os.path.basename(syntax))[0].lower()
         return syntax == 'python'
 
 
-class PyFindSymbolCommand(PythonCommandMixin, TextCommand):
+class PyFindSymbolCommand(PyTagsCommandMixin, TextCommand):
     PROMPT = 'Symbol: '
 
     def run(self, edit, ask=False):
+        # Try to get the symbol from current selection.
         sel = self.view.sel()
         if len(sel) == 1:
             sel = sel[0]
@@ -74,17 +81,21 @@ class PyFindSymbolCommand(PythonCommandMixin, TextCommand):
                                             None, None)
 
     def search(self, symbol):
-        databases = get_ordered_databases(self.view.settings())
-        with SymDb() as symdb:
-            symdb.set_db([os.path.expandvars(db['path']) for db in databases])
+        def async_search(databases):
+            symdb.set_databases(databases)
             results = symdb.query_occurrences(symbol)
+            ui_worker.schedule(handle_results, results)
 
-        if len(results) > 1:
-            self.ask_user_result(results)
-        elif results:  # len(results) == 1
-            self.goto(results[0])
-        else:
-            message_dialog('Symbol "{0}" not found'.format(symbol))
+        def handle_results(results):
+            if len(results) > 1:
+                self.ask_user_result(results)
+            elif results:  # len(results) == 1
+                self.goto(results[0])
+            else:
+                message_dialog('Symbol "{0}" not found'.format(symbol))
+
+        async_worker.schedule(async_search,
+                              self.view.settings().get('pytags_databases'))
 
     def ask_user_result(self, results):
         def on_select(i):
@@ -109,15 +120,22 @@ class PyFindSymbolCommand(PythonCommandMixin, TextCommand):
 
 
 class PyTagsListener(EventListener):
-    @classmethod
-    def index_view(cls, view):
-        file_name = view.file_name()
-        norm_file_name = os.path.normcase(file_name)
+    def index_view(self, view):
         if view.window():
             project_folders = view.window().folders()
         else:
+            # This sometimes happens, no idea when/why.
             project_folders = []
-        for database in get_ordered_databases(view.settings()):
+
+        async_worker.schedule(self.async_index_view, view.file_name(),
+                              view.settings().get('pytags_databases'),
+                              project_folders)
+
+    @staticmethod
+    def async_index_view(file_name, databases, project_folders):
+        norm_file_name = os.path.normcase(file_name)
+        symdb.set_databases(databases)
+        for dbi, database in enumerate(databases):
             roots = database.get('roots', [])
             if database.get('include_project_folders'):
                 roots.extend(project_folders)
@@ -134,29 +152,25 @@ class PyTagsListener(EventListener):
             if pattern and not re.search(pattern, file_name):
                 continue
 
-            async_worker.execute(cls.async_process_file, file_name,
-                                 database['path'])
+            processed = symdb.process_file(dbi, file_name)
 
-    @staticmethod
-    def async_process_file(file_name, database_path):
-        with SymDb() as symdb:
-            symdb.set_db([os.path.expandvars(database_path)])
-            if symdb.process_file(file_name):
-                async_status_message('Indexed ' + file_name)
+            # process_file may return False due to syntax error, but still
+            # update last read time, so commit anyway.
             symdb.commit()
 
-    @classmethod
-    def on_load(cls, view):
+            if processed:
+                ui_worker.schedule(status_message, 'Indexed ' + file_name)
+
+    def on_load(self, view):
         file_name = view.file_name()  # This may be None.
         if file_name is not None and is_python_source_file(file_name) and \
                 view.settings().get('pytags_index_on_load'):
-            cls.index_view(view)
+            self.index_view(view)
 
-    @classmethod
-    def on_post_save(cls, view):
+    def on_post_save(self, view):
         if is_python_source_file(view.file_name()):
             if view.settings().get('pytags_index_on_save'):
-                cls.index_view(view)
+                self.index_view(view)
 
     @staticmethod
     def get_prefix(view, pos):
@@ -166,8 +180,7 @@ class PyTagsListener(EventListener):
         match = re.match(r'[a-zA-Z0-9_.]*', rev_line[rev_col:])
         return match.group()[::-1]
 
-    @classmethod
-    def on_query_completions(cls, view, prefix, locations):
+    def on_query_completions(self, view, prefix, locations):
         settings = view.settings()
 
         # Test if completion disabled by user.
@@ -191,78 +204,140 @@ class PyTagsListener(EventListener):
         # Test for import context.
         if view.score_selector(pos, 'source.python.pytags.import.member'):
             # from..import foo.b<ar-to-complete>
+            module_name = get_module_name(view, pos)
             complete_member = True
         elif view.score_selector(pos, 'source.python.pytags.import.module'):
             # One of:
             # from foo.b<ar-to-complete> import..
             # import foo.b<ar-to-complete>
+            module_prefix = self.get_prefix(view, locations[0])
             complete_member = False
         else:
             # Not in import/from..import statement context.
             return []
 
         # Query the database.
-        with SymDb() as symdb:
-            symdb.set_db([os.path.expandvars(db['path'])
-                          for db in settings.get('pytags_databases')])
+        def async_query_completions(databases):
+            symdb.set_databases(databases)
 
             if complete_member:
-                members = symdb.query_members(get_module_name(view, pos),
-                                              prefix)
+                members = symdb.query_members(module_name, prefix)
                 completions = [(member + '\tMember', member)
                                for member in members]
             else:
-                prefix = cls.get_prefix(view, locations[0])
-                packages = set(package.split('.')[prefix.count('.')]
+                packages = set(package.split('.')[module_prefix.count('.')]
                                for package
-                               in symdb.query_packages(prefix + '*'))
+                               in symdb.query_packages(module_prefix))
                 completions = [(package + '\tModule', package)
                                for package in packages]
+            return completions
 
+        result = async_worker.call(async_query_completions,
+                                   settings.get('pytags_databases'))
+        completions = result.get()
         if settings.get('pytags_exclusive_completions'):
             return (completions,
                     INHIBIT_WORD_COMPLETIONS | INHIBIT_EXPLICIT_COMPLETIONS)
         else:
             return completions
 
+    def on_query_context(self, view, key, operator, operand, match_all):
+        if key != 'pytags_index_in_progress':
+            return None
+        if operator == OP_EQUAL:
+            operator = op_eq
+        elif operator == OP_NOT_EQUAL:
+            operator = op_ne
+        else:
+            return None
+        return operator(PyBuildIndexCommand.index_in_progress, operand)
 
-class PyBuildIndexCommand(PythonCommandMixin, TextCommand):
-    def run(self, edit, rebuild=False):
-        async_worker.execute(self.async_process_files,
-                             self.view.settings().get('pytags_databases', []),
-                             self.view.window().folders(), rebuild)
 
-    @staticmethod
-    def async_process_files(databases, project_folders, rebuild):
-        with SymDb() as symdb:
+class PyBuildIndexCommand(PyTagsCommandMixin, TextCommand):
+    index_in_progress = False
+
+    def run(self, edit, action='update'):
+        if action == 'cancel':
+            self.__class__.index_in_progress = False
+            return
+
+        if action == 'update':
+            rebuild = False
+        elif action == 'rebuild':
+            rebuild = True
+        else:
+            raise ValueError('action must be one of {"cancel", "update", '
+                             '"rebuild"}')
+
+        self.__class__.index_in_progress = True
+        async_worker.schedule(self.async_process_files,
+                              self.view.settings().get('pytags_databases', []),
+                              self.view.window().folders(), rebuild)
+
+    def is_enabled(self, action='update'):
+        if not PyTagsCommandMixin.is_enabled(self):
+            return False
+        if action == 'cancel':
+            return self.index_in_progress
+        else:
+            return not self.index_in_progress
+
+    @classmethod
+    def async_process_files(cls, databases, project_folders, rebuild):
+        try:
+            cls.async_process_files_inner(databases, project_folders, rebuild)
+        finally:
+            cls.index_in_progress = False
+
+    @classmethod
+    def async_process_files_inner(cls, databases, project_folders, rebuild):
+        if rebuild:
+            # Helper process should not reference files to be deleted.
+            symdb._cleanup()
+
+            # Simply remove associated database files if build from scratch is
+            # requested.
             for database in databases:
-                if rebuild:
-                    try:
-                        os.remove(database['path'])
-                    except OSError:
-                        pass
+                try:
+                    os.remove(os.path.expandvars(database['path']))
+                except OSError:
+                    # Specified database file may not yet exist or is
+                    # inaccessible.
+                    pass
 
-                roots = database.get('roots', [])
-                for i, root in enumerate(roots):
-                    roots[i] = os.path.expandvars(root)
-                if database.get('include_project_folders'):
-                    roots.extend(project_folders)
+        symdb.set_databases(databases)
+        for dbi, database in enumerate(databases):
+            roots = database.get('roots', [])
+            for i, root in enumerate(roots):
+                roots[i] = os.path.expandvars(root)
+            if database.get('include_project_folders'):
+                roots.extend(project_folders)
 
-                symdb.set_db([os.path.expandvars(database['path'])])
-                paths = []
-                for symbol_root in roots:
-                    for root, dirs, files in os.walk(symbol_root):
-                        for file_name in files:
-                            if is_python_source_file(file_name):
-                                path = os.path.abspath(os.path.join(root,
-                                                                    file_name))
-                                pattern = database.get('pattern')
-                                if not pattern or re.search(pattern, path):
-                                    paths.append(path)
-                                    if symdb.process_file(path, rebuild):
-                                        async_status_message('Indexed ' + path)
+            symdb.begin_file_processing(dbi)
 
-                symdb.remove_other_files(paths)
-                symdb.commit()
+            for symbol_root in roots:
+                for root, dirs, files in os.walk(symbol_root):
+                    for file_name in files:
+                        if not cls.index_in_progress:
+                            symdb.end_file_processing(dbi)
+                            symdb.commit()
+                            ui_worker.schedule(status_message,
+                                               'Indexing canceled')
+                            return
+                        if not is_python_source_file(file_name):
+                            continue
 
-        async_status_message('Done indexing')
+                        path = os.path.abspath(os.path.join(root,
+                                                            file_name))
+                        pattern = database.get('pattern')
+                        if not pattern or re.search(pattern, path):
+                            if symdb.process_file(dbi, path):
+                                ui_worker.schedule(status_message,
+                                                   'Indexed ' + path)
+                                # Do not commit after each file, since it's
+                                # very slow.
+
+            symdb.end_file_processing(dbi)
+            symdb.commit()
+
+        ui_worker.schedule(status_message, 'Done indexing')

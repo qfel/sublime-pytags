@@ -1,4 +1,11 @@
 [
     { "keys": ["ctrl+t", "ctrl+r"], "command": "py_build_index" },
-    { "keys": ["ctrl+t", "ctrl+t"], "command": "py_find_symbol" }
+    { "keys": ["ctrl+t", "ctrl+t"], "command": "py_find_symbol" },
+    { "keys": ["escape"], "command": "py_build_index",
+        "args": {"action": "cancel"},
+        "context":
+        [
+            { "key": "pytags_index_in_progress", "operator": "equal", "operand": true }
+        ]
+    }
 ]
