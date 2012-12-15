@@ -35,6 +35,7 @@ class SymDbClient(LPCClient):
 
     def set_databases(self, databases):
         if databases != self._databases or self._process is None:
+            PyTagsListener.invalidate_cache()
             self._error = None
             self._databases = databases
             self._call('set_databases', [os.path.expandvars(db['path'])
@@ -128,6 +129,11 @@ class PyFindSymbolCommand(PyTagsCommandMixin, TextCommand):
 
 
 class PyTagsListener(EventListener):
+    NO_PARAMS = None, ' '  # Space is not valid qualified symbol prefix.
+
+    result = None
+    result_params = NO_PARAMS
+
     def index_view(self, view):
         databases = view.settings().get('pytags_databases')
         if not databases:
@@ -191,7 +197,13 @@ class PyTagsListener(EventListener):
         match = re.match(r'[a-zA-Z0-9_.]*', rev_line[rev_col:])
         return match.group()[::-1]
 
-    def on_query_completions(self, view, prefix, locations):
+    @classmethod
+    def invalidate_cache(cls):
+        cls.result = None
+        cls.result_params = cls.NO_PARAMS
+
+    @classmethod
+    def on_query_completions(cls, view, prefix, locations):
         settings = view.settings()
 
         # Test if completion disabled by user.
@@ -221,7 +233,8 @@ class PyTagsListener(EventListener):
             # One of:
             # from foo.b<ar-to-complete> import..
             # import foo.b<ar-to-complete>
-            module_prefix = self.get_prefix(view, locations[0])
+            module_prefix = cls.get_prefix(view, locations[0])
+            dot_count = module_prefix.count('.')
             complete_member = False
         else:
             # Not in import/from..import statement context.
@@ -232,20 +245,43 @@ class PyTagsListener(EventListener):
             symdb.set_databases(databases)
 
             if complete_member:
-                members = symdb.query_members(module_name, prefix)
-                completions = [(member + '\tMember', member)
-                               for member in members]
+                return symdb.query_members(module_name, prefix)
             else:
-                packages = set(package.split('.')[module_prefix.count('.')]
-                               for package
-                               in symdb.query_packages(module_prefix))
-                completions = [(package + '\tModule', package)
-                               for package in packages]
-            return completions
+                return symdb.query_packages(module_prefix)
 
-        result = async_worker.call(async_query_completions,
-                                   settings.get('pytags_databases'))
-        completions = result.get()
+        if complete_member:
+            if cls.result_params[0] != module_name or \
+                    not prefix.startswith(cls.result_params[1]):
+                # Previous request is not compatible with current one.
+                cls.result = None
+        else:
+            if not module_prefix.startswith(cls.result_params[1]) or \
+                    cls.result_params[0] is not None:
+                # Previous request is not compatible with current one.
+                cls.result = None
+
+        if cls.result is None:
+            cls.result = async_worker.call(async_query_completions,
+                                            settings.get('pytags_databases'))
+            if complete_member:
+                cls.result_params = module_name, prefix
+            else:
+                cls.result_params = None, module_prefix
+
+        completed, items = cls.result.get(1.08)
+        if not completed:
+            return []
+
+        if not complete_member:
+            modules = set()
+            for item in items:
+                item = item.split('.')
+                if dot_count < len(item):
+                    modules.add(item[dot_count])
+            completions = [(module + '\tModule', module) for module in modules]
+        else:
+            completions = [(item + '\tMember', item) for item in items]
+
         if settings.get('pytags_exclusive_completions'):
             return (completions,
                     INHIBIT_WORD_COMPLETIONS | INHIBIT_EXPLICIT_COMPLETIONS)
